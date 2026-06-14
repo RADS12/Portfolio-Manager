@@ -1,0 +1,145 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# PortfolioIQ — Local Development Stack
+# Run from the infrastructure/ folder: docker compose up --build
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: portfolioiq-db
+    environment:
+      POSTGRES_DB: portfolioiq
+      POSTGRES_USER: portfolioiq
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portfolioiq"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: portfolioiq-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    container_name: portfolioiq-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - miniodata:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  api:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: portfolioiq-api
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://portfolioiq:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/portfolioiq
+      DATABASE_URL_SYNC: postgresql://portfolioiq:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/portfolioiq
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      S3_ENDPOINT_URL: http://minio:9000
+      # Points to the mounted data folder
+      DATA_DIR: /data
+    volumes:
+      - ../backend:/app
+      - ../data:/data        # <-- CSV files live here
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: portfolioiq-worker
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://portfolioiq:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/portfolioiq
+      DATABASE_URL_SYNC: postgresql://portfolioiq:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/portfolioiq
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      S3_ENDPOINT_URL: http://minio:9000
+      DATA_DIR: /data
+    volumes:
+      - ../backend:/app
+      - ../data:/data
+    depends_on:
+      - api
+    command: celery -A app.worker.tasks.celery_app worker --loglevel=info --concurrency=2
+
+  scheduler:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    container_name: portfolioiq-scheduler
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://portfolioiq:${POSTGRES_PASSWORD:-devpassword}@postgres:5432/portfolioiq
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      DATA_DIR: /data
+    volumes:
+      - ../backend:/app
+      - ../data:/data
+    depends_on:
+      - worker
+    command: celery -A app.worker.tasks.celery_app beat --loglevel=info
+
+  flower:
+    image: mher/flower:2.0.1
+    container_name: portfolioiq-flower
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/1
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile.dev
+    container_name: portfolioiq-frontend
+    volumes:
+      - ../frontend:/app
+      - /app/node_modules
+    ports:
+      - "4200:4200"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
