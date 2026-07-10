@@ -1,5 +1,6 @@
 # PortfolioIQ — Portfolio Manager
 
+This application, including the frontend and backend code, was completely generated using AI (Claude).
 Investment Intelligence Platform. Single-developer, production-grade, locally runnable.
 
 ---
